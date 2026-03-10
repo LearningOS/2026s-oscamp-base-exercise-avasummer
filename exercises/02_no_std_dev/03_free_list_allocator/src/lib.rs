@@ -116,10 +116,52 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         // - If found, remove it from the list (update prev's next or the free_list head)
         // - Return curr as *mut u8
 
+        let mut prev: *mut FreeBlock = null_mut();
+        let mut curr = self.free_list_head();
+
+        while !curr.is_null() {
+            if (curr as usize) % align == 0 && (*curr).size >= size {
+                if prev.is_null() {
+                    self.set_free_list_head((*curr).next);
+                }
+                else {
+                (*prev).next = (*curr).next;
+                }
+                return curr as *mut u8;
+            }
+            prev = curr;
+            curr = (*curr).next;
+        }
         // TODO: Step 2 — no suitable block in free_list, allocate from bump region
         //
         // Same logic as 02_bump_allocator's alloc
-        todo!()
+        loop {
+            let next = self.bump_next.load(core::sync::atomic::Ordering::Relaxed);
+            let aligned_next = (next + align - 1) & !(align -1);
+
+            let end =  match aligned_next.checked_add(size) {
+                Some(e) => e,
+                None => return null_mut(),
+            };
+
+            if end > self.heap_end {
+                return null_mut();
+            }
+
+            match self.bump_next.compare_exchange(
+                next,
+                end,
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::Relaxed
+            ) {
+                Ok(_) => {
+                    return aligned_next as *mut u8;
+                }
+                Err(_) => {
+                    continue;
+                }
+            }
+        }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -129,9 +171,12 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         //
         // Steps:
         // 1. Cast ptr to *mut FreeBlock
+        let victim = ptr as *mut FreeBlock;
         // 2. Write FreeBlock { size, next: current list head }
+        (*victim).size = size;
+        (*victim).next = self.free_list_head();
         // 3. Update free_list head to ptr
-        todo!()
+        self.set_free_list_head(victim);
     }
 }
 
